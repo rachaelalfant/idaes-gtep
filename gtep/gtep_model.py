@@ -2028,8 +2028,8 @@ def commitment_period_rule(b, commitment_period):
 
     # Demand at each bus
     if m.config["scale_loads"]:
-        temp_scale = 3
-        temp_scale = 10
+        temp_scale = 2
+        #temp_scale = 10
 
         for load_n in m.load_buses:
             # [ESR WIP: replace b.loads with the Parameter m.load to
@@ -2079,7 +2079,7 @@ def commitment_period_rule(b, commitment_period):
         #     # print(f"{key=}")
         #     # print(f"{val=}")
         #     b.loads[key] *= 1/3
-        print(f"total load at time period = {sum(b.loads.values())}")
+        #print(f"total load at time period = {sum(b.loads.values())}")
 
     ## TODO: This feels REALLY inelegant and bad.
     ## TODO: Something weird happens if I say periodLength has a unit
@@ -2761,7 +2761,15 @@ def model_data_references(m):
                 if type(m.md.data["elements"]["generator"][renewableGen]["p_max"])
                 == float
                 else max(
-                    m.md.data["elements"]["generator"][renewableGen]["p_max"]["values"]
+                    [
+                        max(
+                            m.data_list[i].data["elements"]["generator"][renewableGen][
+                                "p_max"
+                            ]["values"]
+                        )
+                        for i in range(len(m.data_list))
+                    ]
+                    #m.md.data["elements"]["generator"][renewableGen]["p_max"]["values"]
                 )
             )
             for renewableGen in m.renewableGenerators
