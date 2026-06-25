@@ -56,18 +56,26 @@ def add_model_sets(m, stages, rep_per=["a", "b"], com_per=2, dis_per=2):
     if len(m.md.data["elements"]["branch"]) == 0:
         m.md.data["elements"]["branch"] = m.md.data["elements"]["dc_branch"]
 
-    m.transmission = {
-        branch: {
-            "from_bus": m.md.data["elements"]["branch"][branch]["from_bus"],
-            "to_bus": m.md.data["elements"]["branch"][branch]["to_bus"],
-            "reactance": m.md.data["elements"]["branch"][branch]["reactance"],
-        }
-        for branch in m.md.data["elements"]["branch"]
-    }
+    m.lines = pyo.Set(
+        initialize=m.md.data["elements"]["branch"].keys(),
+        doc="Individual transmission lines",
+    )
 
     m.generators = pyo.Set(
         initialize=m.md.data["elements"]["generator"].keys(),
         doc="All generators",
+    )
+
+    m.generatorsByBus = pyo.Set(
+        m.buses,
+        initialize={
+            bus: [
+                gen
+                for gen in m.generators
+                if m.md.data["elements"]["generator"][gen]["bus"] == bus
+            ]
+            for bus in m.buses
+        },
     )
 
     m.thermalGenerators = pyo.Set(
@@ -90,10 +98,6 @@ def add_model_sets(m, stages, rep_per=["a", "b"], com_per=2, dis_per=2):
         doc="Renewable generators; subset of all generators",
     )
 
-    m.lines = pyo.Set(
-        initialize=m.transmission.keys(), doc="Individual transmission lines"
-    )
-
     m.load_buses = pyo.Set(initialize=[i for i in m.md.data["elements"]["load"]])
 
     # NOTE: We will want to cover baseline generator types in IDAES
@@ -104,6 +108,22 @@ def add_model_sets(m, stages, rep_per=["a", "b"], com_per=2, dis_per=2):
             initialize=(ess for ess in m.md.data["elements"]["storage"]),
             doc="Potential storage units",
         )
+
+    m.storageByBus = pyo.Set(
+        m.buses,
+        initialize={
+            bus: (
+                [
+                    batt
+                    for batt in m.storage
+                    if m.md.data["elements"]["storage"][batt]["bus"] == bus
+                ]
+                if m.md.data["elements"].get("storage")
+                else []
+            )
+            for bus in m.buses
+        },
+    )
 
 
 def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
@@ -155,6 +175,28 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
         mutable=True,
         units=u.MW,
         doc="Maximum output of each thermal generator",
+    )
+
+    m.thermalReactiveMax = pyo.Param(
+        m.thermalGenerators,
+        initialize={
+            thermalGen: m.md.data["elements"]["generator"][thermalGen]["q_max"]
+            for thermalGen in m.thermalGenerators
+        },
+        mutable=True,
+        units=u.MVAR,
+        doc="Maximum reactive output of each thermal generator",
+    )
+
+    m.thermalReactiveMin = pyo.Param(
+        m.thermalGenerators,
+        initialize={
+            thermalGen: m.md.data["elements"]["generator"][thermalGen]["q_min"]
+            for thermalGen in m.thermalGenerators
+        },
+        mutable=True,
+        units=u.MVAR,
+        doc="Minimum reactive output of each thermal generator",
     )
 
     m.lifetimes = pyo.Param(
@@ -218,6 +260,36 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
         doc="Long term thermal rating of each transmission line",
     )
 
+    m.from_bus = pyo.Param(
+        m.lines,
+        initialize={
+            branch: m.md.data["elements"]["branch"][branch]["from_bus"]
+            for branch in m.lines
+        },
+        within=m.buses,
+        doc="Start bus for each transmission line",
+    )
+
+    m.to_bus = pyo.Param(
+        m.lines,
+        initialize={
+            branch: m.md.data["elements"]["branch"][branch]["to_bus"]
+            for branch in m.lines
+        },
+        within=m.buses,
+        doc="End bus for each transmission line",
+    )
+
+    m.reactance = pyo.Param(
+        m.lines,
+        initialize={
+            branch: m.md.data["elements"]["branch"][branch]["reactance"]
+            for branch in m.lines
+        },
+        domain=pyo.Reals,
+        doc="Reactance for each transmission line (ohms)",
+    )
+
     m.spinningReserveFraction = pyo.Param(
         m.thermalGenerators,
         initialize={
@@ -256,10 +328,10 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
     # [TODO: Fixing for dc_branch and branch, but we should revisit
     # this.]
     m.distance = pyo.Param(
-        m.transmission,
+        m.lines,
         initialize={
             branch: (m.md.data["elements"]["branch"][branch].get("distance") or 0)
-            for branch in m.transmission
+            for branch in m.lines
         },
         mutable=True,
         units=u.m,
@@ -270,10 +342,10 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
     # line. Currently selected the value of 0 to ensure investments
     # will be selected, if needed.
     m.branchInvestmentCost = pyo.Param(
-        m.transmission,
+        m.lines,
         initialize={
             branch: (m.md.data["elements"]["branch"][branch].get("capital_cost") or 0)
-            for branch in m.transmission
+            for branch in m.lines
         },
         mutable=True,
         units=u.USD,
@@ -282,24 +354,24 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
 
     # [JSC TODO: Add branch capital multiplier to input data.]
     m.branchCapitalMultiplier = pyo.Param(
-        m.transmission,
+        m.lines,
         initialize={
             branch: (
                 m.md.data["elements"]["branch"][branch].get("capital_multiplier") or 1
             )
-            for branch in m.transmission
+            for branch in m.lines
         },
         mutable=True,
         units=u.dimensionless,
     )
 
     m.branchExtensionMultiplier = pyo.Param(
-        m.transmission,
+        m.lines,
         initialize={
             branch: (
                 m.md.data["elements"]["branch"][branch].get("extension_multiplier") or 1
             )
-            for branch in m.transmission
+            for branch in m.lines
         },
         mutable=True,
         units=u.dimensionless,
@@ -332,6 +404,15 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
         mutable=True,
         units=u.USD / (u.MW * u.hr),
         doc="Cost per unit of fuel at each generator",
+    )
+
+    # setting to be the same as real fuel cost for now... but maybe should be different?
+    m.fuelCostReactive = pyo.Param(
+        m.generators,
+        initialize={gen: m.fuelCost[gen] for gen in m.thermalGenerators},
+        mutable=True,
+        units=u.USD / (u.MVAR * u.hr),
+        doc="Cost per unit of fuel at each generator (reactive power)",
     )
 
     m.emissionsFactor = pyo.Param(
@@ -499,13 +580,13 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
     # Initialize curtailment and load shed costs as parameters and
     # re-calculate them during the investment stage.
     m.curtailmentCost = pyo.Param(
-        initialize=1,
+        initialize=0,
         units=u.USD / (u.MW * u.hr),
         mutable=True,
         doc="Curtailment cost",
     )
     m.loadShedCostperCurtailment = pyo.Param(
-        initialize=1000,
+        initialize=30000,
         units=u.USD / (u.MW * u.hr),
         mutable=True,
     )
@@ -520,9 +601,9 @@ def add_model_parameters(m, num_commit, num_dispatch, duration_dispatch):
     # NOTE: Commented for now since it is not use in this case but
     # might be used in the future when considering ACOPF.
     # m.lossRate = pyo.Param(
-    #     m.transmission,
+    #     m.lines,
     #     initialize={branch: (m.md.data["elements"]["branch"][branch].get("loss_rate") or 0)
-    #                 for branch in m.transmission},
+    #                 for branch in m.lines},
     #     mutable=True,
     #     # units=,
     #     doc="Per-distance-unit multiplicative loss rate for each transmission line"
@@ -612,6 +693,7 @@ def add_model_cost_parameters(m, year):
     units_var_cost = u.USD / (u.MW * u.hr)
     units_inv_cost = u.USD / u.kW
     units_fuel_cost = u.USD / (u.MW * u.hr)
+    units_reactive_fuel_cost = u.USD / (u.MVAR * u.hr)
     for gen in m.generators:
         if m.md.data["elements"]["generator"][gen]["generator_type"] == "thermal":
             m.fixedCost[gen] = pyo.units.convert(
@@ -627,7 +709,7 @@ def add_model_cost_parameters(m, year):
             # Add fuel costs from preprocessed data. Consider this
             # cost is for Natural Gas generators, not coal.
             m.fuelCost[gen] = m.genThermalFuelCost[0] * units_fuel_cost
-
+            m.fuelCostReactive[gen] = m.genThermalFuelCost[0] * units_reactive_fuel_cost
         else:
 
             # For renewable
@@ -650,7 +732,3 @@ def add_model_cost_parameters(m, year):
     # Cost per MW of curtailed renewable energy. This equation
     # re-calculates curtailment and load shed costa since they depend
     # on the re-defined parameter "fuelCost".
-    m.curtailmentCost = 2 * max(
-        pyo.value(m.fuelCost[gen]) for gen in m.thermalGenerators
-    )
-    m.loadShedCostperCurtailment = 1000 * m.curtailmentCost
